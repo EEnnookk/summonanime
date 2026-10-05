@@ -1,0 +1,176 @@
+#!/bin/bash
+
+# COLORS
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+RESET="\e[0m"
+SPEC="\e[31;101m"
+
+Startup(){
+    cat << 'EOF'
+    _              _                              _       ____        _             ____ _     ___ 
+   / \   _ __   __| |_ __ ___  _ __ ___   ___  __| | __ _|  _ \ _   _| |___  ___   / ___| |   |_ _|
+  / _ \ | '_ \ / _` | '__/ _ \| '_ ` _ \ / _ \/ _` |/ _` | |_) | | | | / __|/ _ \ | |   | |    | | 
+ / ___ \| | | | (_| | | | (_) | | | | | |  __/ (_| | (_| |  __/| |_| | \__ \  __/ | |___| |___ | | 
+/_/   \_\_| |_|\__,_|_|  \___/|_| |_| |_|\___|\__,_|\__,_|_|    \__,_|_|___/\___|  \____|_____|___|
+EOF
+}
+
+draw() {
+    local folder_name=$(basename "$1")
+    local total_entries=${#entries[@]}
+    local terminal_height=$(tput lines)
+    # We reserve about 6 lines for the header, Exit, and Back buttons
+    local max_visible=$((terminal_height - 8))
+    
+    # Calculate start/end of the "window"
+    local start=0
+    if ((selected >= max_visible / 2)); then
+        start=$((selected - max_visible / 2))
+    fi
+    
+    # Bound the start so we don't overscroll
+    local max_start=$((total_entries + 2 - max_visible)) # +2 for Exit/Back
+    ((start > max_start)) && start=$max_start
+    ((start < 0)) && start=0
+    
+    local end=$((start + max_visible))
+
+    echo -e "${CYAN}Available options in $folder_name:${RESET}"
+    
+    # 1. Draw File/Folder Entries within the viewport
+    for ((i=0; i<total_entries; i++)); do
+        # Only print if within the viewport
+        if ((i >= start && i < end)); then
+            if [[ $i -eq $selected ]]; then
+                echo -e "${SPEC} ${RESET}${RED}${entries[i]}${GREEN} -> ALL${RESET}"
+            else
+                echo -e " ${GREEN}${entries[i]}${RESET}"
+            fi
+        fi
+    done
+
+    # 2. Handle Exit and Back buttons (they are at indices: total, total+1)
+    # Exit Button
+    if ((total_entries >= start && total_entries < end)); then
+        if [[ $selected -eq $total_entries ]]; then
+            echo -e "\n${SPEC} ${RESET}${RED}Exit${RESET}"
+        else
+            echo -e "\n ${MAGENTA}Exit${RESET}"
+        fi
+    fi
+
+    # Back Button
+    if (((total_entries + 1) >= start && (total_entries + 1) < end)); then
+        if [[ $selected -eq $((total_entries + 1)) ]]; then
+            echo -e "\n${SPEC} ${RESET}${RED}Back${RESET}"
+        else
+            echo -e "\n ${MAGENTA}Back${RESET}"
+        fi
+    fi
+}
+
+navigate() {
+    local folder="$1"
+    # Ensure folder path is absolute to avoid dirname issues
+    folder=$(realpath "$folder")
+    
+    # Use -p to add / to directories (helps visually)
+    mapfile -t entries < <(ls -1 "$folder")
+
+    if [ ${#entries[@]} -eq 0 ] && [[ "$folder" == "/run/media/ANIME.BANK" ]]; then
+        echo -e "${RED}Nothing found in $folder${RESET}"
+        return
+    fi
+
+    local selected=0
+    local dah=""
+    tput civis
+    
+    while true; do
+        clear
+        Startup
+        draw "$folder"
+        
+        read -rsn1 key
+        if [[ $key == $'\e' ]]; then
+            read -rsn2 -t 0.01 rest
+            key+="$rest"
+        fi
+
+        case $key in
+            $'\e[A') ((selected--)) ;;
+            $'\e[B') ((selected++)) ;;
+            $'\e[C') dah="dih"; break ;; # Right arrow = Playlist mode
+            "") break ;;                 # Enter = Select
+            "/")
+                tput cnorm
+                echo -en "\nSearch: "
+                read -r search_query
+                tput civis
+                mapfile -t entries < <(ls -1 "$folder" | grep -i "$search_query")
+                selected=0
+                continue
+                ;;
+            $'\e') # Reset search on Escape
+                mapfile -t entries < <(ls -1 "$folder")
+                selected=0
+                continue
+                ;;
+        esac
+
+        # Wrap around logic
+        local total_options=$((${#entries[@]} + 1))
+        ((selected > total_options)) && selected=0
+        ((selected < 0)) && selected=$total_options
+    done
+
+    # ACTION HANDLING
+    local total_count=${#entries[@]}
+
+    if [[ $selected -eq $total_count ]]; then
+        # EXIT
+        Startup
+        clear
+        tput cnorm
+        exit 0
+    elif [[ $selected -eq $((total_count + 1)) ]]; then
+        # BACK
+        parent=$(dirname "$folder")
+        navigate "$parent"
+        return
+    fi
+
+    selected_path="$folder/${entries[$selected]}"
+    # Remove trailing slash if present (from ls -p)
+    selected_path="${selected_path%/}"
+
+    if [[ "$dah" == "dih" ]]; then
+        # Playlist mode
+        mpv --fs --playlist="$selected_path"
+        navigate "$folder" # Return to menu after mpv
+    elif [[ -d "$selected_path" ]]; then
+        # Folder Navigation
+        navigate "$selected_path"
+    else
+        # File Play
+        mpv --fs "$selected_path"
+        navigate "$folder" # Return to menu after mpv
+    fi
+}
+
+# Start the script
+if [[ -d "/mnt/ANIME/ANIME.BANK" ]]; then
+    navigate "/mnt/ANIME/ANIME.BANK"
+elif [[ ! -z $(lsblk|grep "sda") ]]; then
+    disk-in; navigate "/mnt/ANIME/ANIME.BANK"
+else
+    echo -e "${RED}You haven't conncted the ANIME BANK. Connect and try again${RESET}"
+    exit 1
+fi
+tput cnorm
+clear
